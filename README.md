@@ -56,5 +56,5 @@ Distributed under the MIT License.
 
 This description highlights the current limitations and makes it clear the app is a work in progress.
 
-№№ Compilation 
+## Compilation 
 cl /EHsc language_indicator.cpp user32.lib gdi32.lib shell32.lib
