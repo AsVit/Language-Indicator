@@ -2,6 +2,8 @@
 #include <shellapi.h>
 #include <fstream>
 #include <string>
+#include <ctime>
+#include <sstream>
 
 HINSTANCE hInstance;
 HWND hwnd;
@@ -10,14 +12,72 @@ NOTIFYICONDATA nid;
 HKL previousKeyboardLayout = 0;
 HHOOK hKeyboardLayoutHook = NULL;
 
+class LanguageIndicator;
+static void LogMessage(const std::string& message);
+static void UpdateLanguageText(HWND hWnd);
+static void ShowWindowWithTimer(HWND hWnd);
+static void CenterWindow(HWND hWnd);
+static void FadeInWindow(HWND hWnd);
+static void FadeOutWindow(HWND hWnd);
+
+std::string GetTimestamp() {
+    auto now = std::time(nullptr);
+    auto localTime = *std::localtime(&now);
+    std::ostringstream oss;
+    oss << '[' << (localTime.tm_year + 1900) << '-'
+        << (localTime.tm_mon + 1) << '-'
+        << localTime.tm_mday << ' '
+        << localTime.tm_hour << ':'
+        << localTime.tm_min << ':'
+        << localTime.tm_sec << "] ";
+    return oss.str();
+}
+
+std::string GetLastErrorAsString() {
+    DWORD error = GetLastError();
+    if (error == 0) return "No error";
+
+    LPVOID lpMsgBuf;
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        error,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)&lpMsgBuf,
+        0,
+        NULL
+    );
+
+    std::string message((char*)lpMsgBuf);
+    LocalFree(lpMsgBuf);
+    return "Error " + std::to_string(error) + ": " + message;
+}
+
+static void LogMessage(const std::string& message) {
+    std::ofstream logFile("lang_indicator_debug.log", std::ios::app);
+    if (logFile.is_open()) {
+        logFile << GetTimestamp() << message << std::endl;
+        logFile.close();
+    }
+}
+
 LRESULT CALLBACK KeyboardLayoutProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
-        if (wParam == WM_INPUTLANGCHANGE) {
-            HKL hkl = (HKL)lParam;
-            if (hkl != previousKeyboardLayout) {
-                previousKeyboardLayout = hkl;
-                PostMessage(hwnd, WM_INPUTLANGCHANGE, 0, 0);
-            }
+        PKBDLLHOOKSTRUCT p = (PKBDLLHOOKSTRUCT)lParam;
+
+        static HKL currentLayout = GetKeyboardLayout(0);
+        HKL newLayout = GetKeyboardLayout(0);
+
+        std::ostringstream oss;
+        oss << "Hook - Current layout: 0x" << std::hex << (UINT_PTR)currentLayout
+            << ", New layout: 0x" << (UINT_PTR)newLayout
+            << ", Active window handle: 0x" << std::hex << (UINT_PTR)GetForegroundWindow();
+        LogMessage(oss.str());
+
+        if (newLayout != currentLayout) {
+            currentLayout = newLayout;
+            LogMessage("Layout change detected - Posting WM_INPUTLANGCHANGE");
+            PostMessage(hwnd, WM_INPUTLANGCHANGE, 0, (LPARAM)newLayout);
         }
     }
     return CallNextHookEx(hKeyboardLayoutHook, nCode, wParam, lParam);
@@ -31,6 +91,7 @@ public:
     }
 
     bool Initialize(HINSTANCE hInst) {
+        LogMessage("Initializing Language Indicator");
         hInstance = hInst;
         WNDCLASS wc = { 0 };
         wc.lpfnWndProc = WindowProc;
@@ -40,7 +101,7 @@ public:
         wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
 
         if (!RegisterClass(&wc)) {
-            LogMessage("Failed to register window class.");
+            LogMessage("Failed to register window class: " + GetLastErrorAsString());
             return false;
         }
 
@@ -53,7 +114,7 @@ public:
             NULL, NULL, hInstance, NULL);
 
         if (!hwnd) {
-            LogMessage("Failed to create window.");
+            LogMessage("Failed to create window: " + GetLastErrorAsString());
             return false;
         }
 
@@ -69,45 +130,73 @@ public:
 
         hKeyboardLayoutHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardLayoutProc, hInstance, 0);
         if (!hKeyboardLayoutHook) {
-            LogMessage("Failed to set keyboard layout hook.");
+            LogMessage("Failed to set keyboard layout hook: " + GetLastErrorAsString());
             return false;
         }
 
+        LogMessage("Initialization complete");
         return true;
     }
 
     void Run() {
+        LogMessage("Starting message loop");
         MSG msg = { 0 };
         while (GetMessage(&msg, NULL, 0, 0)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+        LogMessage("Message loop ended");
     }
 
     void Cleanup() {
+        LogMessage("Starting cleanup");
         if (hKeyboardLayoutHook) {
             UnhookWindowsHookEx(hKeyboardLayoutHook);
             hKeyboardLayoutHook = NULL;
         }
         RemoveTrayIcon();
+        LogMessage("Cleanup complete");
     }
 
 private:
-    LanguageIndicator() {}
+    LanguageIndicator() {
+        LogMessage("LanguageIndicator constructor called");
+    }
+
     ~LanguageIndicator() {
+        LogMessage("LanguageIndicator destructor called");
         if (font) DeleteObject(font);
     }
 
     static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+        std::ostringstream oss;
+        oss << "WindowProc - Message: 0x" << std::hex << uMsg
+            << ", wParam: 0x" << wParam
+            << ", lParam: 0x" << lParam;
+        LogMessage(oss.str());
+
         switch (uMsg) {
         case WM_CREATE:
             UpdateLanguageText(hWnd);
             break;
 
-        case WM_INPUTLANGCHANGE:
+        case WM_INPUTLANGCHANGE: {
+            LogMessage("Processing WM_INPUTLANGCHANGE");
+            HWND activeWindow = GetForegroundWindow();
+            oss.str("");
+            oss << "Active window handle: 0x" << std::hex << (UINT_PTR)activeWindow;
+            LogMessage(oss.str());
+
+            char className[256];
+            GetClassNameA(activeWindow, className, sizeof(className));
+            oss.str("");
+            oss << "Active window class: " << className;
+            LogMessage(oss.str());
+
             UpdateLanguageText(hWnd);
             ShowWindowWithTimer(hWnd);
             break;
+        }
 
         case WM_PAINT: {
             PAINTSTRUCT ps;
@@ -125,18 +214,20 @@ private:
             DrawText(hdc, text, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
             EndPaint(hWnd, &ps);
-        } break;
+            break;
+        }
 
         case WM_TIMER:
             if (wParam == 1) {
+                LogMessage("Timer triggered - hiding window");
                 FadeOutWindow(hWnd);
                 KillTimer(hWnd, 1);
-                LogMessage("Window hidden by timer.");
             }
             break;
 
         case WM_APP + 1:
             if (LOWORD(lParam) == WM_RBUTTONDOWN) {
+                LogMessage("Tray icon right-clicked - showing menu");
                 HMENU hMenu = CreatePopupMenu();
                 AppendMenu(hMenu, MF_STRING, 1, "Exit");
 
@@ -148,12 +239,14 @@ private:
                 DestroyMenu(hMenu);
 
                 if (cmd == 1) {
+                    LogMessage("Exit menu item selected");
                     PostQuitMessage(0);
                 }
             }
             break;
 
         case WM_DESTROY:
+            LogMessage("WM_DESTROY received");
             PostQuitMessage(0);
             break;
 
@@ -165,26 +258,39 @@ private:
     }
 
     static void UpdateLanguageText(HWND hWnd) {
+        LogMessage("UpdateLanguageText - Start");
+
         HKL hkl = GetKeyboardLayout(0);
+        std::ostringstream oss;
+        oss << "Current keyboard layout: 0x" << std::hex << (UINT_PTR)hkl;
+        LogMessage(oss.str());
+
         if (hkl != previousKeyboardLayout) {
             LANGID langId = LOWORD(hkl);
             TCHAR langName[10] = { 0 };
 
             if (GetLocaleInfo(langId, LOCALE_SISO639LANGNAME, langName, sizeof(langName) / sizeof(TCHAR))) {
+                oss.str("");
+                oss << "Language name: " << langName;
+                LogMessage(oss.str());
+
                 SetWindowText(hWnd, langName);
                 InvalidateRect(hWnd, NULL, TRUE);
                 UpdateWindow(hWnd);
-                LogMessage("Language updated.");
+                LogMessage("Window text and display updated");
             }
             else {
-                LogMessage("Failed to get language info.");
+                LogMessage("Failed to get language info: " + GetLastErrorAsString());
             }
 
             previousKeyboardLayout = hkl;
         }
+
+        LogMessage("UpdateLanguageText - End");
     }
 
     static void AddTrayIcon(HWND hWnd) {
+        LogMessage("Adding tray icon");
         nid.cbSize = sizeof(NOTIFYICONDATA);
         nid.hWnd = hWnd;
         nid.uID = 1;
@@ -192,16 +298,26 @@ private:
         nid.uCallbackMessage = WM_APP + 1;
         nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
         lstrcpyn(nid.szTip, "Language Indicator", sizeof(nid.szTip) / sizeof(TCHAR));
-        Shell_NotifyIcon(NIM_ADD, &nid);
-        LogMessage("Tray icon added.");
+        if (Shell_NotifyIcon(NIM_ADD, &nid)) {
+            LogMessage("Tray icon added successfully");
+        }
+        else {
+            LogMessage("Failed to add tray icon: " + GetLastErrorAsString());
+        }
     }
 
     static void RemoveTrayIcon() {
-        Shell_NotifyIcon(NIM_DELETE, &nid);
-        LogMessage("Tray icon removed.");
+        LogMessage("Removing tray icon");
+        if (Shell_NotifyIcon(NIM_DELETE, &nid)) {
+            LogMessage("Tray icon removed successfully");
+        }
+        else {
+            LogMessage("Failed to remove tray icon: " + GetLastErrorAsString());
+        }
     }
 
     static void CenterWindow(HWND hWnd) {
+        LogMessage("Centering window");
         RECT rect;
         GetWindowRect(hWnd, &rect);
         int width = rect.right - rect.left;
@@ -213,39 +329,41 @@ private:
         int x = (screenWidth - width) / 2;
         int y = (screenHeight - height) / 2;
 
-        SetWindowPos(hWnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-    }
+        std::ostringstream oss;
+        oss << "Window position - X: " << x << ", Y: " << y
+            << ", Width: " << width << ", Height: " << height;
+        LogMessage(oss.str());
 
-    static void LogMessage(const std::string& message) {
-        std::ofstream logFile("log.txt", std::ios::app);
-        if (logFile.is_open()) {
-            logFile << message << std::endl;
-            logFile.close();
-        }
+        SetWindowPos(hWnd, HWND_TOPMOST, x, y, width, height, SWP_NOZORDER);
     }
 
     static void ShowWindowWithTimer(HWND hWnd) {
+        LogMessage("ShowWindowWithTimer - Starting fade in");
         FadeInWindow(hWnd);
-        SetTimer(hWnd, 1, 1000, NULL); // Timer ID 1, 1 second
-        LogMessage("Window shown with timer.");
+        SetTimer(hWnd, 1, 1000, NULL);
+        LogMessage("Timer set for 1 second");
     }
 
     static void FadeInWindow(HWND hWnd) {
+        LogMessage("FadeInWindow - Start");
         ShowWindow(hWnd, SW_SHOW);
-        CenterWindow(hWnd); // Ensure the window is centered
-        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        CenterWindow(hWnd);
+        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         for (int i = 0; i <= 255; i += 10) {
             SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), i, LWA_ALPHA);
             Sleep(20);
         }
+        LogMessage("FadeInWindow - Complete");
     }
 
     static void FadeOutWindow(HWND hWnd) {
+        LogMessage("FadeOutWindow - Start");
         for (int i = 255; i >= 0; i -= 10) {
             SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), i, LWA_ALPHA);
             Sleep(20);
         }
         ShowWindow(hWnd, SW_HIDE);
+        LogMessage("FadeOutWindow - Complete");
     }
 
     static const TCHAR CLASS_NAME[];
@@ -254,12 +372,17 @@ private:
 const TCHAR LanguageIndicator::CLASS_NAME[] = TEXT("LanguageIndicatorClass");
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    LogMessage("Application starting");
+
     LanguageIndicator& app = LanguageIndicator::GetInstance();
     if (!app.Initialize(hInstance)) {
+        LogMessage("Initialization failed - exiting");
         return 1;
     }
 
     app.Run();
     app.Cleanup();
+
+    LogMessage("Application ending");
     return 0;
 }
